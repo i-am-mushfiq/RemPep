@@ -1,0 +1,381 @@
+name: iOS 26 Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      export_method:
+        description: Distribution method matching both provisioning profiles
+        required: true
+        default: development
+        type: choice
+        options:
+          - development
+          - ad-hoc
+          - app-store-connect
+      publish_release:
+        description: Publish the signed IPA as a GitHub Release asset
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PROJECT: Connect.xcodeproj
+  SCHEME: Connect
+
+jobs:
+  verify:
+    name: Build and test
+    runs-on: macos-26
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check repository privacy
+        run: python3 .github/scripts/check_repository_privacy.py
+
+      - name: Select Xcode 26
+        run: |
+          set -eu
+          preferred='/Applications/Xcode_26.6.app/Contents/Developer'
+          if [ -d "$preferred" ]; then
+            selected="$preferred"
+          else
+            app=$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' -print | sort | tail -1)
+            test -n "$app"
+            selected="$app/Contents/Developer"
+          fi
+          sudo xcode-select --switch "$selected"
+          echo "DEVELOPER_DIR=$selected" >> "$GITHUB_ENV"
+          xcodebuild -version
+
+      - name: Create temporary iPhone simulator
+        run: |
+          set -eu
+          udid=$(python3 .github/scripts/create_simulator.py)
+          echo "SIMULATOR_UDID=$udid" >> "$GITHUB_ENV"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+
+      - name: Run unit tests
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/ConnectTests.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            test | tee "$RUNNER_TEMP/tests.log"
+
+      - name: Upload test diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: connect-test-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/tests.log
+            ${{ runner.temp }}/ConnectTests.xcresult
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove temporary simulator
+        if: always()
+        run: |
+          if [ -n "${SIMULATOR_UDID:-}" ]; then
+            xcrun simctl shutdown "$SIMULATOR_UDID" 2>/dev/null || true
+            xcrun simctl delete "$SIMULATOR_UDID" 2>/dev/null || true
+          fi
+
+  signed-ipa:
+    name: Archive signed IPA
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: macos-26
+    timeout-minutes: 45
+    environment:
+      name: ios-signing
+    outputs:
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
+      ipa_name: ${{ steps.package.outputs.ipa_name }}
+      checksum_name: ${{ steps.package.outputs.checksum_name }}
+      release_tag: ${{ steps.package.outputs.release_tag }}
+      app_version: ${{ steps.package.outputs.app_version }}
+      export_method: ${{ steps.package.outputs.export_method }}
+    env:
+      APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
+      IOS_BUNDLE_ID: ${{ vars.IOS_BUNDLE_ID }}
+      IOS_ICLOUD_CONTAINER_ID: ${{ vars.IOS_ICLOUD_CONTAINER_ID }}
+      IOS_APP_GROUP_ID: ${{ vars.IOS_APP_GROUP_ID }}
+      IOS_EXPORT_METHOD: ${{ inputs.export_method || vars.IOS_EXPORT_METHOD || 'development' }}
+      CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+      CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+      APP_PROFILE_BASE64: ${{ secrets.IOS_APP_PROFILE_BASE64 }}
+      WIDGET_PROFILE_BASE64: ${{ secrets.IOS_WIDGET_PROFILE_BASE64 }}
+      KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26
+        run: |
+          set -eu
+          preferred='/Applications/Xcode_26.6.app/Contents/Developer'
+          if [ -d "$preferred" ]; then
+            selected="$preferred"
+          else
+            app=$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' -print | sort | tail -1)
+            test -n "$app"
+            selected="$app/Contents/Developer"
+          fi
+          sudo xcode-select --switch "$selected"
+          echo "DEVELOPER_DIR=$selected" >> "$GITHUB_ENV"
+          xcodebuild -version
+
+      - name: Validate build configuration
+        run: |
+          set -eu
+          for name in APPLE_TEAM_ID IOS_BUNDLE_ID IOS_ICLOUD_CONTAINER_ID IOS_APP_GROUP_ID CERTIFICATE_BASE64 CERTIFICATE_PASSWORD APP_PROFILE_BASE64 WIDGET_PROFILE_BASE64 KEYCHAIN_PASSWORD; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is not configured. See GITHUB_IPA.md."
+              exit 1
+            fi
+          done
+          case "$IOS_EXPORT_METHOD" in
+            development|ad-hoc|app-store-connect) ;;
+            *) echo "::error::Unsupported export method: $IOS_EXPORT_METHOD"; exit 1 ;;
+          esac
+
+      - name: Apply Apple identifiers
+        run: |
+          python3 .github/scripts/configure_project.py \
+            --bundle-id "$IOS_BUNDLE_ID" \
+            --icloud-container "$IOS_ICLOUD_CONTAINER_ID" \
+            --app-group "$IOS_APP_GROUP_ID"
+
+      - name: Decode and validate provisioning profiles
+        run: |
+          set -eu
+          printf '%s' "$APP_PROFILE_BASE64" | base64 --decode -o "$RUNNER_TEMP/connect-app.mobileprovision"
+          printf '%s' "$WIDGET_PROFILE_BASE64" | base64 --decode -o "$RUNNER_TEMP/connect-widget.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/connect-app.mobileprovision" > "$RUNNER_TEMP/app-profile.plist"
+          security cms -D -i "$RUNNER_TEMP/connect-widget.mobileprovision" > "$RUNNER_TEMP/widget-profile.plist"
+          python3 .github/scripts/validate_profiles.py \
+            --app-profile "$RUNNER_TEMP/app-profile.plist" \
+            --widget-profile "$RUNNER_TEMP/widget-profile.plist" \
+            --team-id "$APPLE_TEAM_ID" \
+            --bundle-id "$IOS_BUNDLE_ID" \
+            --app-group "$IOS_APP_GROUP_ID" \
+            --icloud-container "$IOS_ICLOUD_CONTAINER_ID" \
+            --export-method "$IOS_EXPORT_METHOD"
+
+      - name: Install certificate and provisioning profiles
+        id: signing
+        run: |
+          set -eu
+          certificate="$RUNNER_TEMP/connect-signing.p12"
+          keychain="$RUNNER_TEMP/connect-signing.keychain-db"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 --decode -o "$certificate"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$certificate" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$keychain"
+          security list-keychain -d user -s "$keychain"
+          security find-identity -v -p codesigning "$keychain" | tee "$RUNNER_TEMP/signing-identities.log"
+          grep -Eq '[1-9][0-9]* valid identities found' "$RUNNER_TEMP/signing-identities.log"
+          if [ "$IOS_EXPORT_METHOD" = development ]; then
+            grep -Eq 'Apple Development|iPhone Developer' "$RUNNER_TEMP/signing-identities.log"
+          else
+            grep -Eq 'Apple Distribution|iPhone Distribution' "$RUNNER_TEMP/signing-identities.log"
+          fi
+
+          app_uuid=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/app-profile.plist")
+          app_name=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/app-profile.plist")
+          widget_uuid=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/widget-profile.plist")
+          widget_name=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/widget-profile.plist")
+          profiles="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$profiles"
+          cp "$RUNNER_TEMP/connect-app.mobileprovision" "$profiles/$app_uuid.mobileprovision"
+          cp "$RUNNER_TEMP/connect-widget.mobileprovision" "$profiles/$widget_uuid.mobileprovision"
+
+          echo "app_uuid=$app_uuid" >> "$GITHUB_OUTPUT"
+          echo "app_name=$app_name" >> "$GITHUB_OUTPUT"
+          echo "widget_uuid=$widget_uuid" >> "$GITHUB_OUTPUT"
+          echo "widget_name=$widget_name" >> "$GITHUB_OUTPUT"
+
+      - name: Create export options
+        env:
+          APP_PROFILE_NAME: ${{ steps.signing.outputs.app_name }}
+          WIDGET_PROFILE_NAME: ${{ steps.signing.outputs.widget_name }}
+        run: |
+          python3 .github/scripts/create_export_options.py \
+            --output "$RUNNER_TEMP/ExportOptions.plist" \
+            --method "$IOS_EXPORT_METHOD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --bundle-id "$IOS_BUNDLE_ID" \
+            --app-profile "$APP_PROFILE_NAME" \
+            --widget-profile "$WIDGET_PROFILE_NAME"
+          plutil -lint "$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Archive
+        env:
+          APP_PROFILE_NAME: ${{ steps.signing.outputs.app_name }}
+          WIDGET_PROFILE_NAME: ${{ steps.signing.outputs.widget_name }}
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Connect.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CONNECT_APP_PROFILE="$APP_PROFILE_NAME" \
+            CONNECT_WIDGET_PROFILE="$WIDGET_PROFILE_NAME" \
+            archive | tee "$RUNNER_TEMP/archive.log"
+
+      - name: Export IPA
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/export"
+          xcodebuild \
+            -exportArchive \
+            -archivePath "$RUNNER_TEMP/Connect.xcarchive" \
+            -exportPath "$RUNNER_TEMP/export" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
+            | tee "$RUNNER_TEMP/export.log"
+
+      - name: Verify, name, and checksum IPA
+        id: package
+        run: |
+          set -eu
+          source_ipa=$(find "$RUNNER_TEMP/export" -maxdepth 1 -type f -name '*.ipa' -print -quit)
+          test -n "$source_ipa"
+          verify_dir="$RUNNER_TEMP/verify-ipa"
+          mkdir -p "$verify_dir"
+          unzip -q "$source_ipa" -d "$verify_dir"
+          app_bundle=$(find "$verify_dir/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)
+          test -n "$app_bundle"
+          test -n "$(find "$app_bundle/PlugIns" -maxdepth 1 -type d -name '*.appex' -print -quit)"
+          codesign --verify --deep --strict --verbose=2 "$app_bundle"
+
+          app_info="$RUNNER_TEMP/Connect.xcarchive/Products/Applications/Connect.app/Info.plist"
+          app_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_info")
+          ipa_name="Connect-v${app_version}-${IOS_EXPORT_METHOD}-r${GITHUB_RUN_NUMBER}.ipa"
+          checksum_name="${ipa_name}.sha256"
+          mkdir -p "$RUNNER_TEMP/artifact"
+          cp "$source_ipa" "$RUNNER_TEMP/artifact/$ipa_name"
+          (cd "$RUNNER_TEMP/artifact" && shasum -a 256 "$ipa_name" > "$checksum_name")
+
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            release_tag="$GITHUB_REF_NAME"
+          else
+            release_tag="ios-v${app_version}-${IOS_EXPORT_METHOD}-r${GITHUB_RUN_NUMBER}"
+          fi
+          artifact_name="connect-signed-ipa-${GITHUB_RUN_ID}"
+          echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+          echo "ipa_name=$ipa_name" >> "$GITHUB_OUTPUT"
+          echo "checksum_name=$checksum_name" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "app_version=$app_version" >> "$GITHUB_OUTPUT"
+          echo "export_method=$IOS_EXPORT_METHOD" >> "$GITHUB_OUTPUT"
+
+      - name: Upload signed IPA and checksum
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ runner.temp }}/artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Write build summary
+        run: |
+          {
+            echo '## Signed iOS build'
+            echo
+            echo "- IPA: \`${{ steps.package.outputs.ipa_name }}\`"
+            echo "- Method: \`${{ steps.package.outputs.export_method }}\`"
+            echo "- Version: \`${{ steps.package.outputs.app_version }}\`"
+            echo "- Bundle: \`$IOS_BUNDLE_ID\`"
+            echo "- SHA-256 file: \`${{ steps.package.outputs.checksum_name }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload signing diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: connect-signing-diagnostics-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/archive.log
+            ${{ runner.temp }}/export.log
+            ${{ runner.temp }}/signing-identities.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Remove signing material
+        if: always()
+        env:
+          APP_PROFILE_UUID: ${{ steps.signing.outputs.app_uuid }}
+          WIDGET_PROFILE_UUID: ${{ steps.signing.outputs.widget_uuid }}
+        run: |
+          security delete-keychain "$RUNNER_TEMP/connect-signing.keychain-db" 2>/dev/null || true
+          profiles="$HOME/Library/MobileDevice/Provisioning Profiles"
+          [ -z "${APP_PROFILE_UUID:-}" ] || rm -f "$profiles/$APP_PROFILE_UUID.mobileprovision"
+          [ -z "${WIDGET_PROFILE_UUID:-}" ] || rm -f "$profiles/$WIDGET_PROFILE_UUID.mobileprovision"
+          rm -f "$RUNNER_TEMP/connect-signing.p12" "$RUNNER_TEMP/connect-app.mobileprovision" "$RUNNER_TEMP/connect-widget.mobileprovision"
+
+  release:
+    name: Publish GitHub Release
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+    needs: signed-ipa
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed IPA artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.signed-ipa.outputs.artifact_name }}
+          path: dist
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.signed-ipa.outputs.release_tag }}
+          IPA_NAME: ${{ needs.signed-ipa.outputs.ipa_name }}
+          CHECKSUM_NAME: ${{ needs.signed-ipa.outputs.checksum_name }}
+          APP_VERSION: ${{ needs.signed-ipa.outputs.app_version }}
+          EXPORT_METHOD: ${{ needs.signed-ipa.outputs.export_method }}
+        run: |
+          set -eu
+          notes="Signed Connect iPhone build v${APP_VERSION} using ${EXPORT_METHOD} distribution. Produced by GitHub Actions run #${GITHUB_RUN_NUMBER}."
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "dist/$IPA_NAME" "dist/$CHECKSUM_NAME" --clobber
+          else
+            gh release create "$RELEASE_TAG" "dist/$IPA_NAME#$IPA_NAME" "dist/$CHECKSUM_NAME#$CHECKSUM_NAME" \
+              --target "$GITHUB_SHA" \
+              --title "Connect v${APP_VERSION} (${EXPORT_METHOD})" \
+              --notes "$notes"
+          fi

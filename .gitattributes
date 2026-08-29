@@ -1,0 +1,13 @@
+* text=auto
+
+*.md text eol=lf
+*.pbxproj text eol=lf
+*.plist text eol=lf
+*.py text eol=lf
+*.swift text eol=lf
+*.xcprivacy text eol=lf
+*.xcscheme text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+*.png binary

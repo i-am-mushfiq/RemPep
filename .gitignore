@@ -1,0 +1,19 @@
+*.xcuserstate
+xcuserdata/
+.DS_Store
+DerivedData/
+build/
+
+# Local configuration and Apple signing artifacts must never enter the repo.
+.env
+.env.*
+*.cer
+*.key
+*.mobileprovision
+*.p12
+*.pem
+*.pfx
+
+# Generated distribution products.
+*.ipa
+*.xcarchive
