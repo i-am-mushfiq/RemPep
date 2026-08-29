@@ -8,6 +8,11 @@ on:
     branches: [main, master]
   workflow_dispatch:
     inputs:
+      build_signed:
+        description: Also build an Apple-signed IPA using the ios-signing environment
+        required: true
+        default: false
+        type: boolean
       export_method:
         description: Distribution method matching both provisioning profiles
         required: true
@@ -117,9 +122,89 @@ jobs:
             xcrun simctl delete "$SIMULATOR_UDID" 2>/dev/null || true
           fi
 
+  unsigned-ipa:
+    name: Package unsigned IPA
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: verify
+    runs-on: macos-26
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode 26
+        run: |
+          set -eu
+          preferred='/Applications/Xcode_26.6.app/Contents/Developer'
+          if [ -d "$preferred" ]; then
+            selected="$preferred"
+          else
+            app=$(find /Applications -maxdepth 1 -type d -name 'Xcode_26*.app' -print | sort | tail -1)
+            test -n "$app"
+            selected="$app/Contents/Developer"
+          fi
+          sudo xcode-select --switch "$selected"
+          echo "DEVELOPER_DIR=$selected" >> "$GITHUB_ENV"
+          xcodebuild -version
+
+      - name: Compile device app without signing
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/UnsignedDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            build | tee "$RUNNER_TEMP/unsigned-build.log"
+
+      - name: Package unsigned IPA
+        id: package
+        run: |
+          set -eu
+          products="$RUNNER_TEMP/UnsignedDerivedData/Build/Products/Release-iphoneos"
+          app_bundle=$(find "$products" -maxdepth 1 -type d -name '*.app' -print -quit)
+          test -n "$app_bundle"
+          test -n "$(find "$app_bundle/PlugIns" -maxdepth 1 -type d -name '*.appex' -print -quit)"
+
+          app_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app_bundle/Info.plist")
+          ipa_name="Connect-v${app_version}-unsigned-r${GITHUB_RUN_NUMBER}.ipa"
+          package_root="$RUNNER_TEMP/unsigned-package"
+          artifact_root="$RUNNER_TEMP/unsigned-artifact"
+          mkdir -p "$package_root/Payload" "$artifact_root"
+          cp -R "$app_bundle" "$package_root/Payload/"
+          (cd "$package_root" && zip -qry "$artifact_root/$ipa_name" Payload)
+          (cd "$artifact_root" && shasum -a 256 "$ipa_name" > "$ipa_name.sha256")
+
+          echo "ipa_name=$ipa_name" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=connect-unsigned-ipa-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload unsigned IPA and checksum
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ runner.temp }}/unsigned-artifact/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload unsigned build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: connect-unsigned-build-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/unsigned-build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
   signed-ipa:
     name: Archive signed IPA
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    if: (github.event_name == 'workflow_dispatch' && inputs.build_signed) || startsWith(github.ref, 'refs/tags/v')
     needs: verify
     runs-on: macos-26
     timeout-minutes: 45
@@ -362,7 +447,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_release
+    if: github.event_name == 'workflow_dispatch' && inputs.build_signed && inputs.publish_release
     needs: signed-ipa
     runs-on: ubuntu-latest
     permissions:

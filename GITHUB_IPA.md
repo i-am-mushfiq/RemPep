@@ -1,15 +1,24 @@
-# Build a signed IPA with GitHub Actions
+# Build iPhone IPAs with GitHub Actions
 
 The workflow in `.github/workflows/ios.yml` uses GitHub's `macos-26` runner, prefers Xcode 26.6, and safely falls back to another installed Xcode 26 release.
 
-Every push, pull request, tag, and manual build runs the XCTest suite on a temporary iPhone simulator. A signed IPA is generated when you:
+Every push, pull request, tag, and manual build runs the XCTest suite on a temporary iPhone simulator.
 
-- run **Actions → iOS 26 Build → Run workflow**, or
+Every push to `main` or `master`, every version tag, and every manual run also compiles the device target without signing and uploads:
+
+- `Connect-v<version>-unsigned-r<run>.ipa`
+- its SHA-256 checksum
+
+This unsigned artifact requires no Apple certificate, provisioning profile, developer-team identifier, or GitHub secret. Download it from the workflow run's **Artifacts** section.
+
+An optional signed IPA is generated when you:
+
+- run **Actions → iOS 26 Build → Run workflow** and enable `build_signed`, or
 - push a version tag such as `v1.0.0`.
 
 The resulting IPA and its SHA-256 checksum appear under **Artifacts** on the workflow run. For a manual build, enable `publish_release` only when you explicitly want a direct GitHub Release download. Tagged builds remain workflow artifacts by default because Development and Ad Hoc profiles embed registered device identifiers that should not be published casually.
 
-An unsigned `.ipa` is deliberately not published. It is only a zip containing an unsigned `.app` and cannot be installed on a normal iPhone. The unsigned simulator test job already provides the useful part: proving that the source compiles and its tests pass without exposing signing secrets.
+The unsigned IPA follows the same packaging approach as common sideloading workflows: it is a zip containing `Payload/Connect.app`, including the widget extension. It verifies and distributes the compiled device bundle, but it is not Apple-signed and therefore cannot be installed directly on a stock iPhone without a separate signing or sideloading step.
 
 ## 1. Register identifiers in Apple Developer
 

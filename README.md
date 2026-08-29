@@ -21,7 +21,7 @@ The app works offline. SwiftData is configured for private CloudKit sync when en
 
 ## GitHub IPA builds
 
-The included GitHub Actions workflow runs the XCTest suite, validates both targets' profiles and capabilities, exports and verifies a signed IPA, generates a checksum, and optionally publishes a GitHub Release. Follow [GITHUB_IPA.md](GITHUB_IPA.md) to configure the Apple certificate, main-app and widget provisioning profiles, identifiers, and export method.
+Every push runs the XCTest suite and produces a downloadable unsigned device IPA plus a checksum without requiring Apple credentials. Signed IPA export and optional GitHub Release publishing remain available when Apple signing material is configured. See [GITHUB_IPA.md](GITHUB_IPA.md) for both paths.
 
 ## Targets
 
