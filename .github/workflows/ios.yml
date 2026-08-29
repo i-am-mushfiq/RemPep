@@ -71,6 +71,20 @@ jobs:
           xcrun simctl boot "$udid"
           xcrun simctl bootstatus "$udid" -b
 
+          # CoreSimulator can report a booted device before Xcode's destination
+          # registry has discovered it on a fresh hosted runner.
+          for attempt in {1..12}; do
+            if xcodebuild -project "$PROJECT" -scheme "$SCHEME" -showdestinations 2>/dev/null | grep -q "$udid"; then
+              echo "Xcode discovered simulator $udid"
+              exit 0
+            fi
+            echo "Waiting for Xcode to discover simulator (attempt $attempt/12)"
+            sleep 5
+          done
+          xcrun simctl list devices
+          echo "::error::Xcode did not discover simulator $udid"
+          exit 1
+
       - name: Run unit tests
         run: |
           set -o pipefail
