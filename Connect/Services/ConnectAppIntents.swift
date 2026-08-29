@@ -2,9 +2,9 @@ import AppIntents
 import SwiftData
 
 struct OpenTodayIntent: AppIntent {
-    static var title: LocalizedStringResource = "Show today's connections"
-    static var description = IntentDescription("Open your calm daily connection queue.")
-    static var openAppWhenRun = true
+    static let title: LocalizedStringResource = "Show today's connections"
+    static let description = IntentDescription("Open your calm daily connection queue.")
+    static let openAppWhenRun = true
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
         await MainActor.run { DeepLinkRouter.shared.requestedTab = .today }
@@ -13,8 +13,8 @@ struct OpenTodayIntent: AppIntent {
 }
 
 struct LogConnectionIntent: AppIntent {
-    static var title: LocalizedStringResource = "Log a connection"
-    static var description = IntentDescription("Log a recent interaction by name.")
+    static let title: LocalizedStringResource = "Log a connection"
+    static let description = IntentDescription("Log a recent interaction by name.")
     @Parameter(title: "Person") var personName: String
     @Parameter(title: "Meaningful", default: false) var meaningful: Bool
 
@@ -31,8 +31,8 @@ struct LogConnectionIntent: AppIntent {
 }
 
 struct GetOverduePeopleIntent: AppIntent {
-    static var title: LocalizedStringResource = "Get people ready to reconnect"
-    static var description = IntentDescription("See who is ready for a gentle check-in.")
+    static let title: LocalizedStringResource = "Get people ready to reconnect"
+    static let description = IntentDescription("See who is ready for a gentle check-in.")
 
     @MainActor
     func perform() async throws -> some IntentResult & ReturnsValue<String> & ProvidesDialog {
