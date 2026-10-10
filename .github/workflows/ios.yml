@@ -105,7 +105,7 @@ jobs:
 
       - name: Upload test diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: connect-test-diagnostics-${{ github.run_id }}
           path: |
@@ -186,7 +186,7 @@ jobs:
           echo "artifact_name=connect-unsigned-ipa-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Upload unsigned IPA and checksum
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.package.outputs.artifact_name }}
           path: ${{ runner.temp }}/unsigned-artifact/
@@ -195,7 +195,7 @@ jobs:
 
       - name: Upload unsigned build diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: connect-unsigned-build-diagnostics-${{ github.run_id }}
           path: ${{ runner.temp }}/unsigned-build.log
@@ -402,7 +402,7 @@ jobs:
           echo "export_method=$IOS_EXPORT_METHOD" >> "$GITHUB_OUTPUT"
 
       - name: Upload signed IPA and checksum
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.package.outputs.artifact_name }}
           path: ${{ runner.temp }}/artifact/
@@ -423,7 +423,7 @@ jobs:
 
       - name: Upload signing diagnostics on failure
         if: failure()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: connect-signing-diagnostics-${{ github.run_id }}
           path: |
@@ -454,7 +454,7 @@ jobs:
       contents: write
     steps:
       - name: Download signed IPA artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: ${{ needs.signed-ipa.outputs.artifact_name }}
           path: dist
